@@ -1,8 +1,7 @@
 from services.jira import JiraService
-from services.ai_service import AIService
+from services.ai_service import LangChainAIService
 from config import PROJECT_KEY
 
-# initializing Jira
 jira_service = JiraService()
 tickets = jira_service.fetch_tickets(jql=f"project={PROJECT_KEY} AND status!=Done")
 
@@ -12,25 +11,23 @@ for t in tickets:
 
 docs = [f"{t['summary']} {t['description']}" for t in tickets]
 
-# initializing AI service (Cohere)
-ai_service = AIService(docs)
+ai_service = LangChainAIService(docs)
 
-query = "Summarize key issues and suggest tickets to prioritize."
-summary = ai_service.get_summary(query)
-print("\n=== AI Summary ===\n", summary)
+summary = ai_service.summarize_tickets()
+print("\n=== AI Summary (LangChain SWE) ===\n", summary)
 
-# creating new ticket
+# Create a test ticket
 new_ticket_key = jira_service.create_ticket(
-    summary="Test Ticket via API",
-    description="This ticket was created",
+    summary="Test Ticket via LangChain SWE",
+    description="This ticket was created via LangChain SWE pipeline",
 )
 print("\nNew Ticket Created:", new_ticket_key)
 
-# updating ticket
+# Update first ticket
 if tickets:
     jira_service.update_ticket(
         ticket_key=tickets[0]["key"],
         status="In Progress",
-        comment="Updated status via API.",
+        comment="Updated status via LangChain SWE pipeline.",
     )
     print(f"Updated Ticket: {tickets[0]['key']}")

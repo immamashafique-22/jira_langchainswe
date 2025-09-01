@@ -1,22 +1,45 @@
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import CohereEmbeddings
+from langchain_community.llms import Cohere
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 import os
 
 
-class AIService:
+class LangChainAIService:
     def __init__(self, documents):
         COHERE_API_KEY = os.environ.get("COHERE_API_KEY")
         if not COHERE_API_KEY:
             raise ValueError("COHERE_API_KEY environment variable not set!")
+
         self.embeddings = CohereEmbeddings(
-            model="small", cohere_api_key=COHERE_API_KEY, user_agent="jira_langchain"
+            model="small",
+            cohere_api_key=COHERE_API_KEY,
+            user_agent="langchainSWE-jira_project/1.0",
         )
 
         self.vectorstore = FAISS.from_texts(documents, self.embeddings)
 
-    def retrieve(self, query, k=3):
-        results = self.vectorstore.similarity_search(query, k=k)
-        return [r.page_content for r in results]
+        self.llm = Cohere(
+            model="command",
+            cohere_api_key=COHERE_API_KEY,
+            temperature=0.5,
+            max_tokens=300,
+        )
 
-    def get_summary(self, query):
-        return "\n".join(self.retrieve(query))
+        self.qa_chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            retriever=self.vectorstore.as_retriever(search_kwargs={"k": 5}),
+            return_source_documents=False,
+            chain_type_kwargs={
+                "prompt": PromptTemplate(
+                    template="Summarize the following Jira tickets and suggest priority: {context}\nAnswer concisely.",
+                    input_variables=["context"],
+                )
+            },
+        )
+
+    def summarize_tickets(
+        self, query="Summarize key issues and suggest tickets to prioritize."
+    ):
+        return self.qa_chain.invoke({"query": query})
