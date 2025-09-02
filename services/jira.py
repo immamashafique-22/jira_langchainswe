@@ -46,13 +46,14 @@ class JiraService:
         new_issue = self.jira.create_issue(fields=issue_dict)
 
         if assignee:
-            self.jira.assign_issue(new_issue.key, assignee)
+            try:
+                self.jira.assign_issue(new_issue.key, assignee)
+            except Exception as e:
+                print("Assignee update skipped:", e)
 
         if priority:
             try:
-                self.jira.issue(new_issue.key).update(
-                    fields={"priority": {"name": priority}}
-                )
+                new_issue.update(fields={"priority": {"name": priority}})
             except Exception as e:
                 print("Priority update skipped:", e)
 
@@ -67,7 +68,10 @@ class JiraService:
                 self.jira.transition_issue(issue, transitions[status])
 
         if assignee:
-            self.jira.assign_issue(issue.key, assignee)
+            try:
+                self.jira.assign_issue(issue.key, assignee)
+            except Exception as e:
+                print("Assignee update skipped:", e)
 
         if comment:
             self.jira.add_comment(issue.key, comment)
