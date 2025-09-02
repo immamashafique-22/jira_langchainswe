@@ -1,83 +1,60 @@
 from services.jira import JiraService
-from services.ai_service import LangChainAIService
 from services.github import GitHubService
-from config import PROJECT_KEY
 import os
+from dotenv import load_dotenv
 
-# ------------------------------
-# Jira Setup
-# ------------------------------
+# Load environment variables from .env file
+load_dotenv()
+
 jira_service = JiraService()
-tickets = jira_service.fetch_tickets(jql=f"project={PROJECT_KEY} AND status!=Done")
+github_service = GitHubService(os.environ["GITHUB_TOKEN"], os.environ["GITHUB_REPO"])
 
-print("Fetched Tickets:")
+# ---------- Create a new Jira ticket ----------
+new_ticket = jira_service.create_ticket(
+    project=os.environ["JIRA_PROJECT"],
+    summary="Implement ticket sync with GitHub",
+    description="This ticket will be pushed to GitHub as a .md file and linked with a PR.",
+)
+print(f"Created new Jira ticket: {new_ticket.key}")
+
+# ---------- Update the Jira ticket ----------
+updated_ticket = jira_service.update_ticket(
+    issue_key=new_ticket.key,
+    fields={"summary": "Implement Jira→GitHub sync pipeline"},
+    comment="Updated summary before pushing to GitHub.",
+)
+print(f"Updated Jira ticket: {updated_ticket.key}")
+
+# ---------- Fetch tickets from Jira ----------
+tickets = jira_service.fetch_tickets()
+print("\nFetched Tickets:")
 for t in tickets:
     print(f"{t['key']}: {t['summary']} (Status: {t['status']})")
 
-docs = [f"{t['summary']} {t['description']}" for t in tickets]
+# ---------- Push tickets to GitHub ----------
+for ticket in tickets:
+    branch_name = f"ticket-{ticket['key']}"
+    file_name = f"tickets/{ticket['key']}.md"
+    file_content = f"# {ticket['summary']}\n\n{ticket['description']}\n\nStatus: {ticket['status']}"
 
-# ------------------------------
-# AI Service Setup
-# ------------------------------
-ai_service = LangChainAIService(docs)
+    # Create branch (ignore if exists)
+    try:
+        github_service.create_branch(branch_name)
+    except Exception as e:
+        print(f"Branch may already exist: {e}")
 
-summary = ai_service.summarize_tickets()
-print("\n=== AI Summary (LangChain SWE) ===\n", summary)
-
-# ------------------------------
-# GitHub Setup
-# ------------------------------
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-REPO_NAME = os.environ.get("GITHUB_REPO")
-
-if not GITHUB_TOKEN or not REPO_NAME:
-    raise ValueError("Missing GitHub credentials in environment variables")
-
-github_service = GitHubService(GITHUB_TOKEN, REPO_NAME)
-
-# ------------------------------
-# Create/Update Tickets and PRs
-# ------------------------------
-
-# 1️⃣ Create a test Jira ticket
-new_ticket_key = jira_service.create_ticket(
-    summary="Test Ticket via LangChain SWE",
-    description="This ticket was created via LangChain SWE pipeline",
-)
-print("\nNew Ticket Created:", new_ticket_key)
-
-# 2️⃣ Update first ticket and generate PR
-if tickets:
-    first_ticket = tickets[0]
-
-    jira_service.update_ticket(
-        ticket_key=first_ticket["key"],
-        status="In Progress",
-        comment="Updated status via LangChain SWE pipeline.",
-    )
-    print(f"Updated Ticket: {first_ticket['key']}")
-
-    pr_suggestion = ai_service.generate_pr_suggestions(first_ticket)
-
-    branch_name = pr_suggestion.get("branch", f"{first_ticket['key']}-branch")
-    pr_title = pr_suggestion.get("title", f"PR for {first_ticket['key']}")
-    pr_body = pr_suggestion.get("description", first_ticket["summary"])
-    file_updates = pr_suggestion.get(
-        "files", {"README.md": f"# Update for {first_ticket['key']}"}
+    # Push or update file in GitHub
+    github_service.push_file(
+        branch_name,
+        file_name,
+        file_content,
+        commit_message=f"Add/Update Jira ticket {ticket['key']}",
     )
 
-    # Create branch in GitHub
-    github_service.create_branch(branch_name)
-
-    # Push files
-    for path, content in file_updates.items():
-        github_service.push_file(
-            branch_name,
-            path,
-            content,
-            commit_message=f"Update for {first_ticket['key']}",
-        )
-
-    # Create PR
-    pr = github_service.create_pull_request(pr_title, pr_body, branch_name)
-    print(f"Created GitHub PR: {pr.html_url}")
+    # Create a PR
+    pr = github_service.create_pull_request(
+        title=f"Sync Jira Ticket {ticket['key']}",
+        body=f"This PR syncs Jira ticket {ticket['key']} with GitHub.\n\n{ticket['summary']}",
+        branch_name=branch_name,
+    )
+    print(f"Created GitHub PR for {ticket['key']}: {pr.html_url}")
