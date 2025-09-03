@@ -1,59 +1,73 @@
-Certainly! Below is a complete FastAPI application that implements a Jira to GitHub sync pipeline, along with unit tests using Pytest.
+To implement a Jira to GitHub sync pipeline using FastAPI, we will create a simple FastAPI application that listens for webhooks from Jira and GitHub. The application will handle the synchronization of issues between the two platforms.
 
 ### FastAPI Application Code
 
+Here is a complete FastAPI application code that implements the Jira to GitHub sync pipeline:
+
 ```python
 # main.py
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import requests
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+import httpx
 import os
 
 app = FastAPI()
 
-# Configuration for Jira and GitHub
-JIRA_URL = os.getenv("JIRA_URL")
-JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
-GITHUB_URL = os.getenv("GITHUB_URL")
+JIRA_BASE_URL = os.getenv("JIRA_BASE_URL")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
-class JiraIssue(BaseModel):
-    key: str
-    title: str
-    description: str
+@app.post("/jira-webhook/")
+async def jira_webhook(request: Request):
+    try:
+        payload = await request.json()
+        issue_key = payload['issue']['key']
+        issue_summary = payload['issue']['fields']['summary']
+        issue_status = payload['issue']['fields']['status']['name']
 
-@app.post("/sync")
-async def sync_jira_to_github(issue: JiraIssue):
-    # Fetch the issue from Jira
-    jira_issue = fetch_jira_issue(issue.key)
-    if not jira_issue:
-        raise HTTPException(status_code=404, detail="Jira issue not found")
+        # Create or update GitHub issue
+        await sync_with_github(issue_key, issue_summary, issue_status)
+        return JSONResponse(content={"message": "Sync successful"}, status_code=200)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    # Create a corresponding GitHub issue
-    github_issue = create_github_issue(issue.title, jira_issue['fields']['description'])
-    return {"message": "Issue synced successfully", "github_issue": github_issue}
+async def sync_with_github(issue_key: str, issue_summary: str, issue_status: str):
+    async with httpx.AsyncClient() as client:
+        # Check if the issue already exists in GitHub
+        response = await client.get(f"https://api.github.com/repos/{GITHUB_REPO}/issues", headers={
+            "Authorization": f"token {GITHUB_TOKEN}"
+        })
+        response.raise_for_status()
+        issues = response.json()
 
-def fetch_jira_issue(issue_key: str):
-    response = requests.get(
-        f"{JIRA_URL}/rest/api/2/issue/{issue_key}",
-        auth=('', JIRA_API_TOKEN)
-    )
-    if response.status_code == 200:
-        return response.json()
-    return None
+        # Check if the issue already exists
+        existing_issue = next((issue for issue in issues if issue_key in issue['title']), None)
 
-def create_github_issue(title: str, body: str):
-    response = requests.post(
-        f"{GITHUB_URL}/repos/your_username/your_repo/issues",
-        json={"title": title, "body": body},
-        headers={"Authorization": f"token {GITHUB_TOKEN}"}
-    )
-    if response.status_code == 201:
-        return response.json()
-    raise HTTPException(status_code=response.status_code, detail="Failed to create GitHub issue")
+        if existing_issue:
+            # Update existing issue
+            await client.patch(f"https://api.github.com/repos/{GITHUB_REPO}/issues/{existing_issue['number']}", json={
+                "state": issue_status.lower(),
+                "body": f"Jira Issue: {issue_key}\nSummary: {issue_summary}\nStatus: {issue_status}"
+            }, headers={
+                "Authorization": f"token {GITHUB_TOKEN}"
+            })
+        else:
+            # Create new issue
+            await client.post(f"https://api.github.com/repos/{GITHUB_REPO}/issues", json={
+                "title": f"{issue_key}: {issue_summary}",
+                "body": f"Jira Issue: {issue_key}\nSummary: {issue_summary}\nStatus: {issue_status}"
+            }, headers={
+                "Authorization": f"token {GITHUB_TOKEN}"
+            })
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 ```
 
 ### Unit Tests with Pytest
+
+Here are the unit tests for the FastAPI application using Pytest:
 
 ```python
 # test_main.py
@@ -64,74 +78,66 @@ from main import app
 client = TestClient(app)
 
 @pytest.fixture
-def mock_jira_issue(monkeypatch):
-    def mock_fetch_jira_issue(issue_key):
-        return {
+def mock_jira_webhook_payload():
+    return {
+        "issue": {
+            "key": "JIRA-123",
             "fields": {
-                "description": "This is a test issue description."
+                "summary": "Test issue",
+                "status": {
+                    "name": "In Progress"
+                }
             }
-        }
-    
-    monkeypatch.setattr("main.fetch_jira_issue", mock_fetch_jira_issue)
-
-@pytest.fixture
-def mock_create_github_issue(monkeypatch):
-    def mock_create_github_issue(title, body):
-        return {
-            "html_url": "https://github.com/your_username/your_repo/issues/1",
-            "title": title,
-            "body": body
-        }
-    
-    monkeypatch.setattr("main.create_github_issue", mock_create_github_issue)
-
-def test_sync_jira_to_github(mock_jira_issue, mock_create_github_issue):
-    response = client.post("/sync", json={"key": "TEST-1", "title": "Test Issue", "description": "This is a test issue."})
-    assert response.status_code == 200
-    assert response.json() == {
-        "message": "Issue synced successfully",
-        "github_issue": {
-            "html_url": "https://github.com/your_username/your_repo/issues/1",
-            "title": "Test Issue",
-            "body": "This is a test issue description."
         }
     }
 
-def test_sync_jira_to_github_issue_not_found():
-    response = client.post("/sync", json={"key": "INVALID-1", "title": "Invalid Issue", "description": "This issue does not exist."})
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Jira issue not found"}
+def test_jira_webhook_success(mock_jira_webhook_payload, monkeypatch):
+    async def mock_sync_with_github(issue_key, issue_summary, issue_status):
+        return
 
-def test_create_github_issue_failure(mock_jira_issue):
-    # Simulate a failure in creating a GitHub issue
-    def mock_create_github_issue_failure(title, body):
-        raise HTTPException(status_code=500, detail="Failed to create GitHub issue")
-    
-    with pytest.raises(HTTPException):
-        client.post("/sync", json={"key": "TEST-1", "title": "Test Issue", "description": "This is a test issue."})
+    monkeypatch.setattr("main.sync_with_github", mock_sync_with_github)
+
+    response = client.post("/jira-webhook/", json=mock_jira_webhook_payload)
+    assert response.status_code == 200
+    assert response.json() == {"message": "Sync successful"}
+
+def test_jira_webhook_failure(monkeypatch):
+    async def mock_sync_with_github(issue_key, issue_summary, issue_status):
+        raise Exception("Sync failed")
+
+    monkeypatch.setattr("main.sync_with_github", mock_sync_with_github)
+
+    response = client.post("/jira-webhook/", json={})
+    assert response.status_code == 400
+    assert "detail" in response.json()
 ```
 
-### Instructions for Running the Application and Tests
+### Instructions to Run the Application
 
-1. **Environment Variables**: Make sure to set the following environment variables before running the application:
-   - `JIRA_URL`: The base URL for your Jira instance.
-   - `JIRA_API_TOKEN`: Your Jira API token.
-   - `GITHUB_URL`: The base URL for your GitHub repository (e.g., `https://api.github.com`).
-   - `GITHUB_TOKEN`: Your GitHub personal access token.
+1. **Install Dependencies**: Make sure you have FastAPI and httpx installed. You can install them using pip:
 
-2. **Install Dependencies**: You need to install FastAPI and the required libraries. You can do this using pip:
    ```bash
-   pip install fastapi[all] requests pytest
+   pip install fastapi uvicorn httpx pytest
    ```
 
-3. **Run the Application**: You can run the FastAPI application using Uvicorn:
+2. **Set Environment Variables**: Set the following environment variables before running the application:
+
+   ```bash
+   export JIRA_BASE_URL="https://your-jira-instance.atlassian.net"
+   export GITHUB_REPO="yourusername/yourrepo"
+   export GITHUB_TOKEN="your_github_token"
+   ```
+
+3. **Run the Application**: Start the FastAPI application using Uvicorn:
+
    ```bash
    uvicorn main:app --reload
    ```
 
-4. **Run the Tests**: To run the tests, use the following command:
+4. **Run Tests**: You can run the tests using pytest:
+
    ```bash
    pytest test_main.py
    ```
 
-This setup provides a basic structure for syncing Jira issues to GitHub issues, along with unit tests to ensure the functionality works as expected. Adjust the GitHub repository URL and other configurations as necessary for your specific use case.
+This setup provides a basic implementation of a Jira to GitHub sync pipeline using FastAPI, along with unit tests to ensure the functionality works as expected.
